@@ -4,10 +4,8 @@ defaults:
   - trunk: sum_trunk
   # - branches: [protein_property, protein_generation, protein_constraint]
   - branches: [protein_property, protein_generation]
-  - tasks:
-    # - generic_constraint
-    - generic_task
-    - protein_seq
+  - generic_task: tasks/generic_task
+  - protein_seq: protein_seq
   - guidance_objective: generic_task
   - optim: lambo_conservative
 

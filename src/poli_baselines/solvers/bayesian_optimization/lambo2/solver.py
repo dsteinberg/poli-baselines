@@ -48,9 +48,15 @@ from poli.core.util.seeding import seed_python_numpy_and_torch
 
 from poli_baselines.core.abstract_solver import AbstractSolver
 from poli_baselines.core.utils.mutations import add_random_mutations_to_reach_pop_size
+import poli_baselines
 
-THIS_DIR = Path(__file__).parent.resolve()
-DEFAULT_CONFIG_DIR = THIS_DIR / "hydra_configs"
+import pdb
+
+
+# THIS_DIR = Path(__file__).parent.resolve()
+# DEFAULT_CONFIG_DIR = THIS_DIR / "hydra_configs"
+DEFAULT_CONFIG_DIR = Path(poli_baselines.__file__).parent / "solvers" / "bayesian_optimization" / "lambo2" / "hydra_configs"
+
 
 
 def edit_dist(x: str, y: str):
@@ -157,12 +163,22 @@ class LaMBO2(AbstractSolver):
             y0 = self.black_box(x0_for_black_box)
         elif y0.shape[0] < x0.shape[0]:
             y0 = np.vstack([y0, self.black_box(x0_for_black_box[original_size:])])
+        
+        ### add new lines
+        # best_f = torch.tensor(y0).max(dim=0).values if isinstance(y0, torch.Tensor) else torch.tensor(y0).max(dim=0).values
+        # best_f_list = best_f.tolist()
+        # OmegaConf.set_struct(self.cfg.guidance_objective.static_kwargs, False)
+        # self.cfg.guidance_objective.static_kwargs.best_f = best_f_list
 
         self.history_for_training = {
             "x": [tokenizable_x0],
-            "y": [y0.flatten()],
+            # "y": [y0.flatten()],
+            # I had to change this line:
+            "y": [y0.squeeze()],
             "t": [np.full(len(y0), 0)],
         }
+
+        # pdb.set_trace()
 
         # Pre-training the model.
         MODEL_FOLDER = Path(cfg.data_dir) / self.experiment_id
@@ -189,7 +205,8 @@ class LaMBO2(AbstractSolver):
 
         return {
             "x": [np.array(["".join(x_i).replace(" ", "")]) for x_i in all_x],
-            "y": [np.array([[y_i]]) for y_i in all_y],
+            # "y": [np.array([[y_i]]) for y_i in all_y],
+            "y": [all_y],  # I changed this line
             "t": [np.array([t_i]) for t_i in all_t],
         }
 
@@ -213,6 +230,39 @@ class LaMBO2(AbstractSolver):
         max_epochs : int, optional
             The number of epochs to train the model. Defaults to 2.
         """
+
+        x = np.concatenate(self.history_for_training["x"][::-1])
+        y = np.concatenate(self.history_for_training["y"][::-1])
+        t = np.concatenate(self.history_for_training["t"][::-1])
+
+        t_partition = _geometric_partitioning(t)
+
+        # is_feasible = y > -float("inf")
+        # I had to change this line:
+        # is_feasible = (y > -float("inf")).prod(axis=1)
+        is_feasible = (y > -float("inf")).prod(axis=1).astype(bool)
+        feasible_x = x[is_feasible]
+        feasible_y = y[is_feasible]
+        feasible_t = t[is_feasible]
+
+        # Dynamically set outcome_cols BEFORE model instantiation
+        # model_cfg = self.cfg.tree
+        # model_cfg.generic_task.outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
+        outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
+
+        # pdb.set_trace()
+
+        from omegaconf import OmegaConf
+
+        # Set outcome_cols in the tasks config
+        if self.cfg.tasks.protein_property.get('generic_task') is not None:
+            self.cfg.tasks.protein_property.get('generic_task').outcome_cols = outcome_cols
+        else:
+            print(OmegaConf.to_yaml(self.cfg))
+            raise ValueError("Expected `generic_task` in cfg but not found.")
+
+
+        
         model = hydra.utils.instantiate(self.cfg.tree)
         model.build_tree(self.cfg, skip_task_setup=True)
 
@@ -225,17 +275,6 @@ class LaMBO2(AbstractSolver):
                 )["state_dict"]
             )
 
-        x = np.concatenate(self.history_for_training["x"][::-1])
-        y = np.concatenate(self.history_for_training["y"][::-1])
-        t = np.concatenate(self.history_for_training["t"][::-1])
-
-        t_partition = _geometric_partitioning(t)
-
-        is_feasible = y > -float("inf")
-        feasible_x = x[is_feasible]
-        feasible_y = y[is_feasible]
-        feasible_t = t[is_feasible]
-
         dedup_feas_x, indices = np.unique(feasible_x, return_index=True)
         dedup_feas_y = feasible_y[indices]
         dedup_feas_t = feasible_t[indices]
@@ -243,6 +282,22 @@ class LaMBO2(AbstractSolver):
         print(f"Total History: {len(x)}")
         print(f"Unique Feasible Solutions: {len(dedup_feas_x)}")
         print(f"Top-5 Objective Values: {np.sort(dedup_feas_y.flatten())[-5:]}")
+
+        # 💡 Assign outcome_cols dynamically based on feasible_y
+        # model_cfg.generic_task.outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
+
+        # I've changed the below lines:
+        # Convert multi-objective feasible_y into a 1D numpy object array for DataFrame compatibility
+        # obj_y = np.empty(len(feasible_y), dtype=object)
+        # for idx, row in enumerate(feasible_y):
+        #     obj_y[idx] = row
+        # Prepare separate columns for each objective for regression
+        # num_objs = feasible_y.shape[1]
+        # obj_cols = {}
+        # for i in range(num_objs):
+        #    obj_cols[f"obj_{i}"] = feasible_y[:, i]
+        obj_cols = {f"obj_{i}": feasible_y[:, i] for i in range(feasible_y.shape[1])}
+
 
         task_setup_kwargs = {
             # task_key:
@@ -258,7 +313,9 @@ class LaMBO2(AbstractSolver):
                 "data": {
                     "tokenized_seq": feasible_x,
                     # "generic_task": y[y >= 0] + np.random.normal(0, math.sqrt(0.01), y[y >= 0].shape),
-                    "generic_task": feasible_y,
+                    # "generic_task": feasible_y,
+                    # "generic_task": obj_y,  # I've changed this line
+                    **obj_cols,
                     "recency": t_partition[is_feasible],
                 }
             },
@@ -329,7 +386,8 @@ class LaMBO2(AbstractSolver):
         """
         x = np.concatenate(self.history_for_training["x"], axis=0)
         y = np.concatenate(self.history_for_training["y"], axis=0)
-        sorted_y0_idxs = np.argsort(y.flatten())[::-1]
+        # sorted_y0_idxs = np.argsort(y.flatten())[::-1]
+        sorted_y0_idxs = np.argsort(y)[::-1]
         candidate_points = x[
             sorted_y0_idxs[
                 : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
@@ -341,12 +399,29 @@ class LaMBO2(AbstractSolver):
             ]
         ]
 
-        indices = farthest_first_traversal(
+        '''indices = farthest_first_traversal(
             library=candidate_points,
             distance_fn=edit_dist,
             ranking_scores=torch.tensor(candidate_scores.flatten()),
             n=self.cfg.num_samples,
             descending=True,
+        )'''
+
+        # pdb.set_trace()
+
+        # Case: candidate_scores is 3D → Reduce to 1D
+        candidate_scores = np.array(candidate_scores)
+        if candidate_scores.ndim == 3:
+           candidate_scores = candidate_scores.mean(axis=(1, 2))
+        elif candidate_scores.ndim == 2:
+           candidate_scores = candidate_scores.mean(axis=1)
+        
+        indices = farthest_first_traversal(
+           library=candidate_points,
+           distance_fn=edit_dist,
+           ranking_scores=torch.tensor(candidate_scores.flatten()),
+           n=min(self.cfg.num_samples, len(candidate_points)),
+           descending=True,
         )
         # print(candidate_points[indices])
         print(candidate_scores[indices])
@@ -364,6 +439,12 @@ class LaMBO2(AbstractSolver):
             load_checkpoint_from=self.model_path,
             max_epochs=self.max_epochs_for_retraining,
         )
+
+        # best_f_tensor = torch.tensor(self.history["y"][-1]).max(dim=0).values
+        # best_f = best_f_tensor.tolist()
+
+        # OmegaConf.set_struct(self.cfg.guidance_objective.static_kwargs, False)
+        # self.cfg.guidance_objective.static_kwargs.best_f = best_f
 
         # Builds the acquisition function
         candidate_points = self.get_candidate_points()
@@ -421,7 +502,8 @@ class LaMBO2(AbstractSolver):
 
         # Updating the history that is used for training.
         self.history_for_training["x"].append(new_designs)
-        self.history_for_training["y"].append(new_y.flatten())
+        # self.history_for_training["y"].append(new_y.flatten())
+        self.history_for_training["y"].append(new_y)  # I've changed this line
         last_t = self.history_for_training["t"][-1][-1]
         self.history_for_training["t"].append(np.full(len(new_y), last_t + 1))
 
