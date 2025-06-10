@@ -3,9 +3,6 @@ protein_property:
     _target_: cortex.task.RegressionTask
     input_map:
       protein_seq: ['tokenized_seq']
-    outcome_cols:  # override this programmatically later
-      - obj_0
-      - obj_1
     corrupt_train_inputs: true
     root_key: protein_seq
     nominal_label_var: 0.01
