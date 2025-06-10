@@ -43,14 +43,28 @@ except ImportError as e:
 
 import numpy as np
 import torch
+from botorch.acquisition.multi_objective.monte_carlo import qExpectedHypervolumeImprovement
+from botorch.utils.multi_objective.box_decompositions import NondominatedPartitioning
+from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.models import SingleTaskGP
+from botorch.models.model_list_gp_regression import ModelListGP
+from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
+
 from poli.core.abstract_black_box import AbstractBlackBox
 from poli.core.util.seeding import seed_python_numpy_and_torch
-
 from poli_baselines.core.abstract_solver import AbstractSolver
 from poli_baselines.core.utils.mutations import add_random_mutations_to_reach_pop_size
+import poli_baselines
 
-THIS_DIR = Path(__file__).parent.resolve()
-DEFAULT_CONFIG_DIR = THIS_DIR / "hydra_configs"
+from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+
+import pdb
+
+
+# THIS_DIR = Path(__file__).parent.resolve()
+# DEFAULT_CONFIG_DIR = THIS_DIR / "hydra_configs"
+DEFAULT_CONFIG_DIR = Path(poli_baselines.__file__).parent / "solvers" / "bayesian_optimization" / "lambo2" / "hydra_configs"
+
 
 
 def edit_dist(x: str, y: str):
@@ -157,12 +171,22 @@ class LaMBO2(AbstractSolver):
             y0 = self.black_box(x0_for_black_box)
         elif y0.shape[0] < x0.shape[0]:
             y0 = np.vstack([y0, self.black_box(x0_for_black_box[original_size:])])
+        
+        ### add new lines
+        # best_f = torch.tensor(y0).max(dim=0).values if isinstance(y0, torch.Tensor) else torch.tensor(y0).max(dim=0).values
+        # best_f_list = best_f.tolist()
+        # OmegaConf.set_struct(self.cfg.guidance_objective.static_kwargs, False)
+        # self.cfg.guidance_objective.static_kwargs.best_f = best_f_list
 
         self.history_for_training = {
             "x": [tokenizable_x0],
-            "y": [y0.flatten()],
+            # "y": [y0.flatten()],
+            # I had to change this line:
+            "y": [y0.squeeze()],
             "t": [np.full(len(y0), 0)],
         }
+
+        # pdb.set_trace()
 
         # Pre-training the model.
         MODEL_FOLDER = Path(cfg.data_dir) / self.experiment_id
@@ -189,7 +213,8 @@ class LaMBO2(AbstractSolver):
 
         return {
             "x": [np.array(["".join(x_i).replace(" ", "")]) for x_i in all_x],
-            "y": [np.array([[y_i]]) for y_i in all_y],
+            # "y": [np.array([[y_i]]) for y_i in all_y],
+            "y": [all_y],  # I changed this line
             "t": [np.array([t_i]) for t_i in all_t],
         }
 
@@ -213,6 +238,39 @@ class LaMBO2(AbstractSolver):
         max_epochs : int, optional
             The number of epochs to train the model. Defaults to 2.
         """
+
+        x = np.concatenate(self.history_for_training["x"][::-1])
+        y = np.concatenate(self.history_for_training["y"][::-1])
+        t = np.concatenate(self.history_for_training["t"][::-1])
+
+        t_partition = _geometric_partitioning(t)
+
+        # is_feasible = y > -float("inf")
+        # I had to change this line:
+        # is_feasible = (y > -float("inf")).prod(axis=1)
+        is_feasible = (y > -float("inf")).prod(axis=1).astype(bool)
+        feasible_x = x[is_feasible]
+        feasible_y = y[is_feasible]
+        feasible_t = t[is_feasible]
+
+        # Dynamically set outcome_cols BEFORE model instantiation
+        # model_cfg = self.cfg.tree
+        # model_cfg.generic_task.outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
+        outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
+
+        # pdb.set_trace()
+
+        from omegaconf import OmegaConf
+
+        # Set outcome_cols in the tasks config
+        if self.cfg.tasks.protein_property.get('generic_task') is not None:
+            self.cfg.tasks.protein_property.get('generic_task').outcome_cols = outcome_cols
+        else:
+            print(OmegaConf.to_yaml(self.cfg))
+            raise ValueError("Expected `generic_task` in cfg but not found.")
+
+
+        
         model = hydra.utils.instantiate(self.cfg.tree)
         model.build_tree(self.cfg, skip_task_setup=True)
 
@@ -225,17 +283,6 @@ class LaMBO2(AbstractSolver):
                 )["state_dict"]
             )
 
-        x = np.concatenate(self.history_for_training["x"][::-1])
-        y = np.concatenate(self.history_for_training["y"][::-1])
-        t = np.concatenate(self.history_for_training["t"][::-1])
-
-        t_partition = _geometric_partitioning(t)
-
-        is_feasible = y > -float("inf")
-        feasible_x = x[is_feasible]
-        feasible_y = y[is_feasible]
-        feasible_t = t[is_feasible]
-
         dedup_feas_x, indices = np.unique(feasible_x, return_index=True)
         dedup_feas_y = feasible_y[indices]
         dedup_feas_t = feasible_t[indices]
@@ -243,6 +290,22 @@ class LaMBO2(AbstractSolver):
         print(f"Total History: {len(x)}")
         print(f"Unique Feasible Solutions: {len(dedup_feas_x)}")
         print(f"Top-5 Objective Values: {np.sort(dedup_feas_y.flatten())[-5:]}")
+
+        # 💡 Assign outcome_cols dynamically based on feasible_y
+        # model_cfg.generic_task.outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
+
+        # I've changed the below lines:
+        # Convert multi-objective feasible_y into a 1D numpy object array for DataFrame compatibility
+        # obj_y = np.empty(len(feasible_y), dtype=object)
+        # for idx, row in enumerate(feasible_y):
+        #     obj_y[idx] = row
+        # Prepare separate columns for each objective for regression
+        # num_objs = feasible_y.shape[1]
+        # obj_cols = {}
+        # for i in range(num_objs):
+        #    obj_cols[f"obj_{i}"] = feasible_y[:, i]
+        obj_cols = {f"obj_{i}": feasible_y[:, i] for i in range(feasible_y.shape[1])}
+
 
         task_setup_kwargs = {
             # task_key:
@@ -258,7 +321,9 @@ class LaMBO2(AbstractSolver):
                 "data": {
                     "tokenized_seq": feasible_x,
                     # "generic_task": y[y >= 0] + np.random.normal(0, math.sqrt(0.01), y[y >= 0].shape),
-                    "generic_task": feasible_y,
+                    # "generic_task": feasible_y,
+                    # "generic_task": obj_y,  # I've changed this line
+                    **obj_cols,
                     "recency": t_partition[is_feasible],
                 }
             },
@@ -321,37 +386,161 @@ class LaMBO2(AbstractSolver):
         else:
             return self.get_candidate_points_from_history()
 
+    def farthest_first_traversal_moo(
+        self,
+        library,
+        distance_fn,
+        ranking_scores,
+        n,
+        descending=True,
+    ):
+        """
+        Multi-objective farthest-first traversal using Pareto rank as priority.
+        Lower ranks are better (i.e., rank 0 = Pareto front).
+    
+        Parameters:
+            library: List of candidate items (e.g., sequences)
+            distance_fn: Function to compute pairwise distances
+            ranking_scores: 1D array of Pareto ranks (ints) OR
+                            2D array of objective values
+            n: Number of points to select
+            descending: Whether to prioritize higher or lower scores
+                        (for ranks, descending=False means prefer lower ranks)
+    
+        Returns:
+            List of selected indices
+        """
+    
+        if isinstance(ranking_scores, torch.Tensor):
+            ranking_scores = ranking_scores.cpu().numpy()
+    
+        if len(ranking_scores.shape) == 2:
+            # convert from multi-objective scores to Pareto ranks
+            from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+            nds = NonDominatedSorting()
+            _, rank = nds.do(ranking_scores, return_rank=True)
+        else:
+            rank = ranking_scores
+    
+        if descending:
+            score_order = np.argsort(-rank)
+        else:
+            score_order = np.argsort(rank)
+    
+        selected = []
+        selected.append(score_order[0])
+    
+        for _ in range(1, n):
+            max_dist = -1
+            best_idx = None
+            for i in score_order:
+                if i in selected:
+                    continue
+                min_dist = min(distance_fn(library[i], library[j]) for j in selected)
+                if min_dist > max_dist:
+                    max_dist = min_dist
+                    best_idx = i
+            if best_idx is not None:
+                selected.append(best_idx)
+    
+        return selected
+
     def get_candidate_points_from_history(self) -> np.ndarray:
         """
         Returns the current best population (whose size is specified in the
         configuration file as cfg.num_samples) from the history of the black
-        box evaluations.
+        box evaluations, using EHVI for candidate selection.
         """
+
         x = np.concatenate(self.history_for_training["x"], axis=0)
         y = np.concatenate(self.history_for_training["y"], axis=0)
-        sorted_y0_idxs = np.argsort(y.flatten())[::-1]
-        candidate_points = x[
-            sorted_y0_idxs[
-                : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
-            ]
-        ]
-        candidate_scores = y[
-            sorted_y0_idxs[
-                : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
-            ]
-        ]
 
-        indices = farthest_first_traversal(
-            library=candidate_points,
-            distance_fn=edit_dist,
-            ranking_scores=torch.tensor(candidate_scores.flatten()),
-            n=self.cfg.num_samples,
-            descending=True,
+        # Prepare candidate pool
+        nds = NonDominatedSorting()
+        _, sorted_y0_idxs = nds.do(y, return_rank=True)
+        top_k = min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
+
+        candidate_points = x[sorted_y0_idxs[:top_k]]
+        candidate_scores = y[sorted_y0_idxs[:top_k]]
+
+        # Convert candidate_points to tensors with proper formatting
+        candidate_tensor = torch.tensor(
+            np.array([[ord(c) for c in s.replace(" ", "")] for s in candidate_points]),
+            dtype=torch.float32
         )
-        # print(candidate_points[indices])
-        print(candidate_scores[indices])
 
-        return candidate_points[indices]
+        # Convert full training data to tensors
+        train_x = torch.tensor(
+            np.array([[ord(c) for c in s.replace(" ", "")] for s in x]),
+            dtype=torch.float32
+        )
+        train_y = torch.tensor(y, dtype=torch.float32)
+
+        # Train separate GPs for each objective
+        models = [SingleTaskGP(train_x, train_y[:, i:i+1]) for i in range(train_y.shape[1])]
+        model = ModelListGP(*models)
+        mll = SumMarginalLogLikelihood(model.likelihood, model)
+        model.train()
+        mll.eval()
+
+        # EHVI acquisition
+        ref_point = train_y.min(dim=0).values - 0.1
+        partitioning = NondominatedPartitioning(ref_point=ref_point, Y=train_y)
+        sampler = SobolQMCNormalSampler(sample_shape=torch.Size([128]))
+        acq_fn = qExpectedHypervolumeImprovement(
+            model=model,
+            ref_point=ref_point.tolist(),
+            partitioning=partitioning,
+            sampler=sampler,
+        )
+
+        # Evaluate EHVI scores for each candidate (in batch mode)
+        model.eval()
+        with torch.no_grad():
+            acq_vals = acq_fn(candidate_tensor.unsqueeze(1))
+
+        # pdb.set_trace()
+        
+        topk = torch.topk(acq_vals.squeeze(), k=self.cfg.num_samples).indices
+
+        selected = candidate_points[topk.numpy()]
+        print(candidate_scores[topk.numpy()])
+
+        return selected
+
+    # def get_candidate_points_from_history(self) -> np.ndarray:
+    #     """
+    #     Returns the current best population (whose size is specified in the
+    #     configuration file as cfg.num_samples) from the history of the black
+    #     box evaluations.
+    #     """
+    #     x = np.concatenate(self.history_for_training["x"], axis=0)
+    #     y = np.concatenate(self.history_for_training["y"], axis=0)
+
+    #     nds = NonDominatedSorting()
+    #     _, sorted_y0_idxs = nds.do(y, return_rank=True)
+    #     candidate_points = x[
+    #         sorted_y0_idxs[
+    #             : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
+    #         ]
+    #     ]
+    #     candidate_scores = y[
+    #         sorted_y0_idxs[
+    #             : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
+    #         ]
+    #     ]
+        
+    #     indices = self.farthest_first_traversal_moo(
+    #        library=candidate_points,
+    #        distance_fn=edit_dist,
+    #        ranking_scores=torch.tensor(candidate_scores, dtype=torch.float32),
+    #        n=min(self.cfg.num_samples, len(candidate_points)),
+    #        descending=True,
+    #     )
+
+    #     print(candidate_scores[indices])
+
+    #     return candidate_points[indices]
 
     def step(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -364,6 +553,12 @@ class LaMBO2(AbstractSolver):
             load_checkpoint_from=self.model_path,
             max_epochs=self.max_epochs_for_retraining,
         )
+
+        # best_f_tensor = torch.tensor(self.history["y"][-1]).max(dim=0).values
+        # best_f = best_f_tensor.tolist()
+
+        # OmegaConf.set_struct(self.cfg.guidance_objective.static_kwargs, False)
+        # self.cfg.guidance_objective.static_kwargs.best_f = best_f
 
         # Builds the acquisition function
         candidate_points = self.get_candidate_points()
@@ -415,13 +610,17 @@ class LaMBO2(AbstractSolver):
             [seq.replace(" ", "") for seq in new_designs]
         )
 
+        print('new_designs_for_black_box shape: ', new_designs_for_black_box.shape)
+        print('new_designs_for_black_box shape: ', new_designs_for_black_box)
+
         # Evaluate the black box
         new_y = self.black_box(new_designs_for_black_box)
         print(new_y)
 
         # Updating the history that is used for training.
         self.history_for_training["x"].append(new_designs)
-        self.history_for_training["y"].append(new_y.flatten())
+        # self.history_for_training["y"].append(new_y.flatten())
+        self.history_for_training["y"].append(new_y)  # I've changed this line
         last_t = self.history_for_training["t"][-1][-1]
         self.history_for_training["t"].append(np.full(len(new_y), last_t + 1))
 

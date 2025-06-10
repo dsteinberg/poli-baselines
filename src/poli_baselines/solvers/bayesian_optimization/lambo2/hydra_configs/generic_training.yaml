@@ -4,10 +4,8 @@ defaults:
   - trunk: sum_trunk
   # - branches: [protein_property, protein_generation, protein_constraint]
   - branches: [protein_property, protein_generation]
-  - tasks:
-    # - generic_constraint
-    - generic_task
-    - protein_seq
+  - generic_task: tasks/generic_task
+  - protein_seq: roots/protein_seq
   - guidance_objective: generic_task
   - optim: lambo_conservative
 
@@ -23,7 +21,7 @@ num_mutations_per_step: 2
 max_sequence_length: 256
 num_samples: ${batch_size}
 allow_length_change: false
-accelerator: cpu
+accelerator: cuda # cpu
 fft_expansion_factor: 2
 
 trainer:

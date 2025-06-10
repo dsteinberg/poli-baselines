@@ -79,7 +79,7 @@ bounce = [
     "bounce @ git+https://github.com/miguelgondu/bounce.git@main"
 ]
 lambo2 = [
-    "pytorch-cortex",
+    "pytorch-cortex @ git+https://github.com/dsteinberg/cortex.git@moo",
     "beignet",
     "pydantic<2.0.0",
 ]
