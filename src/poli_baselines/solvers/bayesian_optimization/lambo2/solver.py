@@ -48,6 +48,7 @@ from botorch.utils.multi_objective.box_decompositions import NondominatedPartiti
 from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.models import SingleTaskGP
 from botorch.models.model_list_gp_regression import ModelListGP
+from omegaconf import OmegaConf
 from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
 
 from poli.core.abstract_black_box import AbstractBlackBox
@@ -57,8 +58,6 @@ from poli_baselines.core.utils.mutations import add_random_mutations_to_reach_po
 import poli_baselines
 
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
-
-import pdb
 
 
 # THIS_DIR = Path(__file__).parent.resolve()
@@ -147,7 +146,6 @@ class LaMBO2(AbstractSolver):
         L.seed_everything(seed=cfg.random_seed, workers=True)
 
         self.cfg = cfg
-        print(OmegaConf.to_yaml(cfg))
         self.logger = logger
 
         if x0 is None:
@@ -171,22 +169,23 @@ class LaMBO2(AbstractSolver):
             y0 = self.black_box(x0_for_black_box)
         elif y0.shape[0] < x0.shape[0]:
             y0 = np.vstack([y0, self.black_box(x0_for_black_box[original_size:])])
-        
-        ### add new lines
-        # best_f = torch.tensor(y0).max(dim=0).values if isinstance(y0, torch.Tensor) else torch.tensor(y0).max(dim=0).values
-        # best_f_list = best_f.tolist()
-        # OmegaConf.set_struct(self.cfg.guidance_objective.static_kwargs, False)
-        # self.cfg.guidance_objective.static_kwargs.best_f = best_f_list
+
+        # Dynamically set outcome_cols BEFORE model instantiation
+        self.outcome_cols = [f"obj_{i}" for i in range(y0.shape[1])]
+
+        # Set outcome_cols in the tasks config
+        if self.cfg.tasks.protein_property.get('generic_task') is not None:
+            self.cfg.tasks.protein_property.get('generic_task').outcome_cols = outcome_cols
+        else:
+            print(OmegaConf.to_yaml(self.cfg))
+            raise ValueError("Expected `generic_task` in cfg but not found.")
+        print(OmegaConf.to_yaml(cfg))
 
         self.history_for_training = {
             "x": [tokenizable_x0],
-            # "y": [y0.flatten()],
-            # I had to change this line:
             "y": [y0.squeeze()],
             "t": [np.full(len(y0), 0)],
         }
-
-        # pdb.set_trace()
 
         # Pre-training the model.
         MODEL_FOLDER = Path(cfg.data_dir) / self.experiment_id
@@ -213,8 +212,7 @@ class LaMBO2(AbstractSolver):
 
         return {
             "x": [np.array(["".join(x_i).replace(" ", "")]) for x_i in all_x],
-            # "y": [np.array([[y_i]]) for y_i in all_y],
-            "y": [all_y],  # I changed this line
+            "y": [all_y],
             "t": [np.array([t_i]) for t_i in all_t],
         }
 
@@ -245,32 +243,11 @@ class LaMBO2(AbstractSolver):
 
         t_partition = _geometric_partitioning(t)
 
-        # is_feasible = y > -float("inf")
-        # I had to change this line:
-        # is_feasible = (y > -float("inf")).prod(axis=1)
         is_feasible = (y > -float("inf")).prod(axis=1).astype(bool)
         feasible_x = x[is_feasible]
         feasible_y = y[is_feasible]
         feasible_t = t[is_feasible]
 
-        # Dynamically set outcome_cols BEFORE model instantiation
-        # model_cfg = self.cfg.tree
-        # model_cfg.generic_task.outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
-        outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
-
-        # pdb.set_trace()
-
-        from omegaconf import OmegaConf
-
-        # Set outcome_cols in the tasks config
-        if self.cfg.tasks.protein_property.get('generic_task') is not None:
-            self.cfg.tasks.protein_property.get('generic_task').outcome_cols = outcome_cols
-        else:
-            print(OmegaConf.to_yaml(self.cfg))
-            raise ValueError("Expected `generic_task` in cfg but not found.")
-
-
-        
         model = hydra.utils.instantiate(self.cfg.tree)
         model.build_tree(self.cfg, skip_task_setup=True)
 
@@ -289,24 +266,16 @@ class LaMBO2(AbstractSolver):
 
         print(f"Total History: {len(x)}")
         print(f"Unique Feasible Solutions: {len(dedup_feas_x)}")
-        print(f"Top-5 Objective Values: {np.sort(dedup_feas_y.flatten())[-5:]}")
+        # Find top candidates
+        nds = NonDominatedSorting()
+        _, sorted_y0_idxs = nds.do(dedup_feas_y, return_rank=True)
+        top_y = dedup_feas_y[sorted_y0_idxs[:5]]
+        print(f"Top-5 Objective Values: \n{top_y}")
 
-        # 💡 Assign outcome_cols dynamically based on feasible_y
-        # model_cfg.generic_task.outcome_cols = [f"obj_{i}" for i in range(feasible_y.shape[1])]
-
-        # I've changed the below lines:
-        # Convert multi-objective feasible_y into a 1D numpy object array for DataFrame compatibility
-        # obj_y = np.empty(len(feasible_y), dtype=object)
-        # for idx, row in enumerate(feasible_y):
-        #     obj_y[idx] = row
-        # Prepare separate columns for each objective for regression
-        # num_objs = feasible_y.shape[1]
-        # obj_cols = {}
-        # for i in range(num_objs):
-        #    obj_cols[f"obj_{i}"] = feasible_y[:, i]
-        obj_cols = {f"obj_{i}": feasible_y[:, i] for i in range(feasible_y.shape[1])}
-
-
+        obj_cols = {
+            oc: feasible_y[:, i]
+            for oc, i in zip(self.outcome_cols, range(feasible_y.shape[1]))
+        }
         task_setup_kwargs = {
             # task_key:
             "generic_constraint": {
@@ -320,9 +289,6 @@ class LaMBO2(AbstractSolver):
                 # dataset kwarg
                 "data": {
                     "tokenized_seq": feasible_x,
-                    # "generic_task": y[y >= 0] + np.random.normal(0, math.sqrt(0.01), y[y >= 0].shape),
-                    # "generic_task": feasible_y,
-                    # "generic_task": obj_y,  # I've changed this line
                     **obj_cols,
                     "recency": t_partition[is_feasible],
                 }
@@ -351,7 +317,6 @@ class LaMBO2(AbstractSolver):
         self.trainer.fit(
             model,
             train_dataloaders=model.get_dataloader(split="train"),
-            # val_dataloaders=model.get_dataloader(split="val"),
         )
 
         if save_checkpoint_to:
@@ -397,7 +362,7 @@ class LaMBO2(AbstractSolver):
         """
         Multi-objective farthest-first traversal using Pareto rank as priority.
         Lower ranks are better (i.e., rank 0 = Pareto front).
-    
+
         Parameters:
             library: List of candidate items (e.g., sequences)
             distance_fn: Function to compute pairwise distances
@@ -406,14 +371,14 @@ class LaMBO2(AbstractSolver):
             n: Number of points to select
             descending: Whether to prioritize higher or lower scores
                         (for ranks, descending=False means prefer lower ranks)
-    
+
         Returns:
             List of selected indices
         """
-    
+
         if isinstance(ranking_scores, torch.Tensor):
             ranking_scores = ranking_scores.cpu().numpy()
-    
+
         if len(ranking_scores.shape) == 2:
             # convert from multi-objective scores to Pareto ranks
             from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
@@ -421,15 +386,15 @@ class LaMBO2(AbstractSolver):
             _, rank = nds.do(ranking_scores, return_rank=True)
         else:
             rank = ranking_scores
-    
+
         if descending:
             score_order = np.argsort(-rank)
         else:
             score_order = np.argsort(rank)
-    
+
         selected = []
         selected.append(score_order[0])
-    
+
         for _ in range(1, n):
             max_dist = -1
             best_idx = None
@@ -442,7 +407,7 @@ class LaMBO2(AbstractSolver):
                     best_idx = i
             if best_idx is not None:
                 selected.append(best_idx)
-    
+
         return selected
 
     def get_candidate_points_from_history(self) -> np.ndarray:
@@ -499,8 +464,6 @@ class LaMBO2(AbstractSolver):
         with torch.no_grad():
             acq_vals = acq_fn(candidate_tensor.unsqueeze(1))
 
-        # pdb.set_trace()
-        
         topk = torch.topk(acq_vals.squeeze(), k=self.cfg.num_samples).indices
 
         selected = candidate_points[topk.numpy()]
@@ -529,7 +492,7 @@ class LaMBO2(AbstractSolver):
     #             : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
     #         ]
     #     ]
-        
+
     #     indices = self.farthest_first_traversal_moo(
     #        library=candidate_points,
     #        distance_fn=edit_dist,
@@ -553,12 +516,6 @@ class LaMBO2(AbstractSolver):
             load_checkpoint_from=self.model_path,
             max_epochs=self.max_epochs_for_retraining,
         )
-
-        # best_f_tensor = torch.tensor(self.history["y"][-1]).max(dim=0).values
-        # best_f = best_f_tensor.tolist()
-
-        # OmegaConf.set_struct(self.cfg.guidance_objective.static_kwargs, False)
-        # self.cfg.guidance_objective.static_kwargs.best_f = best_f
 
         # Builds the acquisition function
         candidate_points = self.get_candidate_points()
@@ -619,12 +576,9 @@ class LaMBO2(AbstractSolver):
 
         # Updating the history that is used for training.
         self.history_for_training["x"].append(new_designs)
-        # self.history_for_training["y"].append(new_y.flatten())
-        self.history_for_training["y"].append(new_y)  # I've changed this line
+        self.history_for_training["y"].append(new_y)
         last_t = self.history_for_training["t"][-1][-1]
         self.history_for_training["t"].append(np.full(len(new_y), last_t + 1))
-
-        # print(f"\n{new_designs_for_black_box}\n")
 
         return new_designs_for_black_box, new_y
 
