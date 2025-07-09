@@ -31,7 +31,6 @@ try:
     import edlib
     import hydra
     import lightning as L
-    from beignet import farthest_first_traversal
     from omegaconf import OmegaConf
 except ImportError as e:
     raise ImportError(
@@ -43,8 +42,12 @@ except ImportError as e:
 
 import numpy as np
 import torch
-from botorch.acquisition.multi_objective.monte_carlo import qExpectedHypervolumeImprovement
-from botorch.utils.multi_objective.box_decompositions import NondominatedPartitioning
+from botorch.acquisition.multi_objective.monte_carlo import (
+    qExpectedHypervolumeImprovement,
+)
+from botorch.utils.multi_objective.box_decompositions import (
+    NondominatedPartitioning,
+)
 from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.models import SingleTaskGP
 from botorch.models.model_list_gp_regression import ModelListGP
@@ -54,7 +57,9 @@ from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
 from poli.core.abstract_black_box import AbstractBlackBox
 from poli.core.util.seeding import seed_python_numpy_and_torch
 from poli_baselines.core.abstract_solver import AbstractSolver
-from poli_baselines.core.utils.mutations import add_random_mutations_to_reach_pop_size
+from poli_baselines.core.utils.mutations import (
+    add_random_mutations_to_reach_pop_size,
+)
 import poli_baselines
 
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
@@ -62,8 +67,13 @@ from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 
 # THIS_DIR = Path(__file__).parent.resolve()
 # DEFAULT_CONFIG_DIR = THIS_DIR / "hydra_configs"
-DEFAULT_CONFIG_DIR = Path(poli_baselines.__file__).parent / "solvers" / "bayesian_optimization" / "lambo2" / "hydra_configs"
-
+DEFAULT_CONFIG_DIR = (
+    Path(poli_baselines.__file__).parent
+    / "solvers"
+    / "bayesian_optimization"
+    / "lambo2"
+    / "hydra_configs"
+)
 
 
 def edit_dist(x: str, y: str):
@@ -132,7 +142,9 @@ class LaMBO2(AbstractSolver):
             if config_dir is None:
                 config_dir = DEFAULT_CONFIG_DIR
             with hydra.initialize_config_dir(config_dir=str(config_dir)):
-                cfg = hydra.compose(config_name=config_name, overrides=overrides)
+                cfg = hydra.compose(
+                    config_name=config_name, overrides=overrides
+                )
                 OmegaConf.set_struct(cfg, False)
         else:
             cfg = config
@@ -163,19 +175,25 @@ class LaMBO2(AbstractSolver):
 
         tokenizable_x0 = np.array([" ".join(x_i) for x_i in x0])
 
-        x0_for_black_box = np.array([seq.replace(" ", "") for seq in tokenizable_x0])
+        x0_for_black_box = np.array(
+            [seq.replace(" ", "") for seq in tokenizable_x0]
+        )
 
         if y0 is None:
             y0 = self.black_box(x0_for_black_box)
         elif y0.shape[0] < x0.shape[0]:
-            y0 = np.vstack([y0, self.black_box(x0_for_black_box[original_size:])])
+            y0 = np.vstack(
+                [y0, self.black_box(x0_for_black_box[original_size:])]
+            )
 
         # Dynamically set outcome_cols BEFORE model instantiation
         self.outcome_cols = [f"obj_{i}" for i in range(y0.shape[1])]
 
         # Set outcome_cols in the tasks config
-        if self.cfg.tasks.protein_property.get('generic_task') is not None:
-            self.cfg.tasks.protein_property.get('generic_task').outcome_cols = outcome_cols
+        if self.cfg.tasks.protein_property.get("generic_task") is not None:
+            self.cfg.tasks.protein_property.get("generic_task").outcome_cols = (
+                self.outcome_cols
+            )
         else:
             print(OmegaConf.to_yaml(self.cfg))
             raise ValueError("Expected `generic_task` in cfg but not found.")
@@ -334,9 +352,15 @@ class LaMBO2(AbstractSolver):
                     self.restrict_candidate_points_to
                 )
                 candidate_points = np.array(
-                    [tokenizable_candidate_point for _ in range(self.cfg.num_samples)]
+                    [
+                        tokenizable_candidate_point
+                        for _ in range(self.cfg.num_samples)
+                    ]
                 )
-            elif self.restrict_candidate_points_to.shape[0] == self.cfg.num_samples:
+            elif (
+                self.restrict_candidate_points_to.shape[0]
+                == self.cfg.num_samples
+            ):
                 candidate_points = np.array(
                     [" ".join(x_i) for x_i in self.restrict_candidate_points_to]
                 )
@@ -382,6 +406,7 @@ class LaMBO2(AbstractSolver):
         if len(ranking_scores.shape) == 2:
             # convert from multi-objective scores to Pareto ranks
             from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+
             nds = NonDominatedSorting()
             _, rank = nds.do(ranking_scores, return_rank=True)
         else:
@@ -401,7 +426,9 @@ class LaMBO2(AbstractSolver):
             for i in score_order:
                 if i in selected:
                     continue
-                min_dist = min(distance_fn(library[i], library[j]) for j in selected)
+                min_dist = min(
+                    distance_fn(library[i], library[j]) for j in selected
+                )
                 if min_dist > max_dist:
                     max_dist = min_dist
                     best_idx = i
@@ -423,26 +450,33 @@ class LaMBO2(AbstractSolver):
         # Prepare candidate pool
         nds = NonDominatedSorting()
         _, sorted_y0_idxs = nds.do(y, return_rank=True)
-        top_k = min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
+        top_k = min(
+            len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples
+        )
 
         candidate_points = x[sorted_y0_idxs[:top_k]]
         candidate_scores = y[sorted_y0_idxs[:top_k]]
 
         # Convert candidate_points to tensors with proper formatting
         candidate_tensor = torch.tensor(
-            np.array([[ord(c) for c in s.replace(" ", "")] for s in candidate_points]),
-            dtype=torch.float32
+            np.array(
+                [[ord(c) for c in s.replace(" ", "")] for s in candidate_points]
+            ),
+            dtype=torch.float32,
         )
 
         # Convert full training data to tensors
         train_x = torch.tensor(
             np.array([[ord(c) for c in s.replace(" ", "")] for s in x]),
-            dtype=torch.float32
+            dtype=torch.float32,
         )
         train_y = torch.tensor(y, dtype=torch.float32)
 
         # Train separate GPs for each objective
-        models = [SingleTaskGP(train_x, train_y[:, i:i+1]) for i in range(train_y.shape[1])]
+        models = [
+            SingleTaskGP(train_x, train_y[:, i : i + 1])
+            for i in range(train_y.shape[1])
+        ]
         model = ModelListGP(*models)
         mll = SumMarginalLogLikelihood(model.likelihood, model)
         model.train()
@@ -567,8 +601,10 @@ class LaMBO2(AbstractSolver):
             [seq.replace(" ", "") for seq in new_designs]
         )
 
-        print('new_designs_for_black_box shape: ', new_designs_for_black_box.shape)
-        print('new_designs_for_black_box shape: ', new_designs_for_black_box)
+        print(
+            "new_designs_for_black_box shape: ", new_designs_for_black_box.shape
+        )
+        print("new_designs_for_black_box shape: ", new_designs_for_black_box)
 
         # Evaluate the black box
         new_y = self.black_box(new_designs_for_black_box)
