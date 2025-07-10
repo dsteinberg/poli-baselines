@@ -197,6 +197,7 @@ class LaMBO2(AbstractSolver):
         else:
             print(OmegaConf.to_yaml(self.cfg))
             raise ValueError("Expected `generic_task` in cfg but not found.")
+        # self.cfg.guidance_objective.static_kwargs.objectives = self.outcome_cols
         print(OmegaConf.to_yaml(cfg))
 
         self.history_for_training = {
@@ -437,107 +438,111 @@ class LaMBO2(AbstractSolver):
 
         return selected
 
-    def get_candidate_points_from_history(self) -> np.ndarray:
-        """
-        Returns the current best population (whose size is specified in the
-        configuration file as cfg.num_samples) from the history of the black
-        box evaluations, using EHVI for candidate selection.
-        """
-
-        x = np.concatenate(self.history_for_training["x"], axis=0)
-        y = np.concatenate(self.history_for_training["y"], axis=0)
-
-        # Prepare candidate pool
-        nds = NonDominatedSorting()
-        _, sorted_y0_idxs = nds.do(y, return_rank=True)
-        top_k = min(
-            len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples
-        )
-
-        candidate_points = x[sorted_y0_idxs[:top_k]]
-        candidate_scores = y[sorted_y0_idxs[:top_k]]
-
-        # Convert candidate_points to tensors with proper formatting
-        candidate_tensor = torch.tensor(
-            np.array(
-                [[ord(c) for c in s.replace(" ", "")] for s in candidate_points]
-            ),
-            dtype=torch.float32,
-        )
-
-        # Convert full training data to tensors
-        train_x = torch.tensor(
-            np.array([[ord(c) for c in s.replace(" ", "")] for s in x]),
-            dtype=torch.float32,
-        )
-        train_y = torch.tensor(y, dtype=torch.float32)
-
-        # Train separate GPs for each objective
-        models = [
-            SingleTaskGP(train_x, train_y[:, i : i + 1])
-            for i in range(train_y.shape[1])
-        ]
-        model = ModelListGP(*models)
-        mll = SumMarginalLogLikelihood(model.likelihood, model)
-        model.train()
-        mll.eval()
-
-        # EHVI acquisition
-        ref_point = train_y.min(dim=0).values - 0.1
-        partitioning = NondominatedPartitioning(ref_point=ref_point, Y=train_y)
-        sampler = SobolQMCNormalSampler(sample_shape=torch.Size([128]))
-        acq_fn = qExpectedHypervolumeImprovement(
-            model=model,
-            ref_point=ref_point.tolist(),
-            partitioning=partitioning,
-            sampler=sampler,
-        )
-
-        # Evaluate EHVI scores for each candidate (in batch mode)
-        model.eval()
-        with torch.no_grad():
-            acq_vals = acq_fn(candidate_tensor.unsqueeze(1))
-
-        topk = torch.topk(acq_vals.squeeze(), k=self.cfg.num_samples).indices
-
-        selected = candidate_points[topk.numpy()]
-        print(candidate_scores[topk.numpy()])
-
-        return selected
-
     # def get_candidate_points_from_history(self) -> np.ndarray:
     #     """
     #     Returns the current best population (whose size is specified in the
     #     configuration file as cfg.num_samples) from the history of the black
-    #     box evaluations.
+    #     box evaluations, using EHVI for candidate selection.
     #     """
+
     #     x = np.concatenate(self.history_for_training["x"], axis=0)
     #     y = np.concatenate(self.history_for_training["y"], axis=0)
 
+    #     # Prepare candidate pool
     #     nds = NonDominatedSorting()
     #     _, sorted_y0_idxs = nds.do(y, return_rank=True)
-    #     candidate_points = x[
-    #         sorted_y0_idxs[
-    #             : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
-    #         ]
-    #     ]
-    #     candidate_scores = y[
-    #         sorted_y0_idxs[
-    #             : min(len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples)
-    #         ]
-    #     ]
-
-    #     indices = self.farthest_first_traversal_moo(
-    #        library=candidate_points,
-    #        distance_fn=edit_dist,
-    #        ranking_scores=torch.tensor(candidate_scores, dtype=torch.float32),
-    #        n=min(self.cfg.num_samples, len(candidate_points)),
-    #        descending=True,
+    #     top_k = min(
+    #         len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples
     #     )
 
-    #     print(candidate_scores[indices])
+    #     candidate_points = x[sorted_y0_idxs[:top_k]]
+    #     candidate_scores = y[sorted_y0_idxs[:top_k]]
 
-    #     return candidate_points[indices]
+    #     # Convert candidate_points to tensors with proper formatting
+    #     candidate_tensor = torch.tensor(
+    #         np.array(
+    #             [[ord(c) for c in s.replace(" ", "")] for s in candidate_points]
+    #         ),
+    #         dtype=torch.float32,
+    #     )
+
+    #     # Convert full training data to tensors
+    #     train_x = torch.tensor(
+    #         np.array([[ord(c) for c in s.replace(" ", "")] for s in x]),
+    #         dtype=torch.float32,
+    #     )
+    #     train_y = torch.tensor(y, dtype=torch.float32)
+
+    #     # Train separate GPs for each objective
+    #     models = [
+    #         SingleTaskGP(train_x, train_y[:, i : i + 1])
+    #         for i in range(train_y.shape[1])
+    #     ]
+    #     model = ModelListGP(*models)
+    #     mll = SumMarginalLogLikelihood(model.likelihood, model)
+    #     model.train()
+    #     mll.eval()
+
+    #     # EHVI acquisition
+    #     ref_point = train_y.min(dim=0).values - 0.1
+    #     partitioning = NondominatedPartitioning(ref_point=ref_point, Y=train_y)
+    #     sampler = SobolQMCNormalSampler(sample_shape=torch.Size([128]))
+    #     acq_fn = qExpectedHypervolumeImprovement(
+    #         model=model,
+    #         ref_point=ref_point.tolist(),
+    #         partitioning=partitioning,
+    #         sampler=sampler,
+    #     )
+
+    #     # Evaluate EHVI scores for each candidate (in batch mode)
+    #     model.eval()
+    #     with torch.no_grad():
+    #         acq_vals = acq_fn(candidate_tensor.unsqueeze(1))
+
+    #     topk = torch.topk(acq_vals.squeeze(), k=self.cfg.num_samples).indices
+
+    #     selected = candidate_points[topk.numpy()]
+    #     print(candidate_scores[topk.numpy()])
+
+    #     return selected
+
+    def get_candidate_points_from_history(self) -> np.ndarray:
+        """
+        Returns the current best population (whose size is specified in the
+        configuration file as cfg.num_samples) from the history of the black
+        box evaluations.
+        """
+        x = np.concatenate(self.history_for_training["x"], axis=0)
+        y = np.concatenate(self.history_for_training["y"], axis=0)
+
+        nds = NonDominatedSorting()
+        _, sorted_y0_idxs = nds.do(y, return_rank=True)
+        candidate_points = x[
+            sorted_y0_idxs[
+                : min(
+                    len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples
+                )
+            ]
+        ]
+        candidate_scores = y[
+            sorted_y0_idxs[
+                : min(
+                    len(x), self.cfg.fft_expansion_factor * self.cfg.num_samples
+                )
+            ]
+        ]
+
+        indices = self.farthest_first_traversal_moo(
+            library=candidate_points,
+            distance_fn=edit_dist,
+            ranking_scores=torch.tensor(candidate_scores, dtype=torch.float32),
+            n=min(self.cfg.num_samples, len(candidate_points)),
+            descending=True,
+        )
+
+        print(candidate_scores[indices])
+
+        return candidate_points[indices]
 
     def step(self) -> tuple[np.ndarray, np.ndarray]:
         """
