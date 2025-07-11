@@ -44,6 +44,7 @@ import numpy as np
 import torch
 from botorch.utils.multi_objective import is_non_dominated
 from omegaconf import OmegaConf
+from beignet import farthest_first_traversal
 
 from poli.core.abstract_black_box import AbstractBlackBox
 from poli.core.util.seeding import seed_python_numpy_and_torch
@@ -54,7 +55,6 @@ from poli_baselines.core.utils.mutations import (
 import poli_baselines
 
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
-from pymoo.indicators.gd import GD
 
 
 # THIS_DIR = Path(__file__).parent.resolve()
@@ -367,88 +367,25 @@ class LaMBO2(AbstractSolver):
         else:
             return self.get_candidate_points_from_history()
 
-    def farthest_first_traversal_moo(
-        self,
-        library,
-        distance_fn,
-        ranking_scores,
-        n,
-        descending=True,
-    ):
-        """
-        Multi-objective farthest-first traversal using Pareto rank as priority.
-        Lower ranks are better (i.e., rank 0 = Pareto front).
-
-        Parameters:
-            library: List of candidate items (e.g., sequences)
-            distance_fn: Function to compute pairwise distances
-            ranking_scores: 1D array of Pareto ranks (ints) OR
-                            2D array of objective values
-            n: Number of points to select
-            descending: Whether to prioritize higher or lower scores
-                        (for ranks, descending=False means prefer lower ranks)
-
-        Returns:
-            List of selected indices
-        """
-
-        if isinstance(ranking_scores, torch.Tensor):
-            ranking_scores = ranking_scores.cpu().numpy()
-
-        if len(ranking_scores.shape) == 2:
-            # convert from multi-objective scores to Pareto ranks
-            nds = NonDominatedSorting()
-            _, rank = nds.do(
-                -ranking_scores, return_rank=True
-            )  # pymoo assumes minimisation
-        else:
-            rank = ranking_scores
-
-        if descending:
-            score_order = np.argsort(-rank)
-        else:
-            score_order = np.argsort(rank)
-
-        selected = []
-        selected.append(score_order[0])
-
-        for _ in range(1, n):
-            max_dist = -1
-            best_idx = None
-            for i in score_order:
-                if i in selected:
-                    continue
-                min_dist = min(
-                    distance_fn(library[i], library[j]) for j in selected
-                )
-                if min_dist > max_dist:
-                    max_dist = min_dist
-                    best_idx = i
-            if best_idx is not None:
-                selected.append(best_idx)
-
-        return selected
-
     def get_candidate_points_from_history(self) -> np.ndarray:
         y = np.concatenate(self.history_for_training["y"], axis=0)
         if y.ndim < 2:
-            return self.get_candidate_points_from_history_old()
+            return self.get_candidate_points_from_history_1d()
         if y.shape[1] == 1:
-            return self.get_candidate_points_from_history_old()
+            return self.get_candidate_points_from_history_1d()
         x = np.concatenate(self.history_for_training["x"], axis=0)
 
-        indices = self.farthest_first_traversal_moo(
-            library=x,
-            distance_fn=edit_dist,
-            ranking_scores=torch.tensor(y),
-            n=min(self.cfg.num_samples, len(x)),
-            descending=False,
-        )
+        # convert from multi-objective scores to Pareto ranks
+        nds = NonDominatedSorting()
+        _, rank = nds.do(-y, return_rank=True)  # pymoo assumes minimisation
+        score_order = np.argsort(rank)
+        indices = score_order[: min(self.cfg.num_samples, len(x))]
+
         print("Initial scores of candidates to mutate:")
         print(y[indices])
         return x[indices]
 
-    def get_candidate_points_from_history_old(self) -> np.ndarray:
+    def get_candidate_points_from_history_1d(self) -> np.ndarray:
         """
         Returns the current best population (whose size is specified in the
         configuration file as cfg.num_samples) from the history of the black
@@ -456,9 +393,7 @@ class LaMBO2(AbstractSolver):
         """
         x = np.concatenate(self.history_for_training["x"], axis=0)
         y = np.concatenate(self.history_for_training["y"], axis=0)
-
-        nds = NonDominatedSorting()
-        _, sorted_y0_idxs = nds.do(y, return_rank=True)
+        sorted_y0_idxs = np.argsort(y.flatten())[::-1]
         candidate_points = x[
             sorted_y0_idxs[
                 : min(
@@ -474,14 +409,13 @@ class LaMBO2(AbstractSolver):
             ]
         ]
 
-        indices = self.farthest_first_traversal_moo(
+        indices = farthest_first_traversal(
             library=candidate_points,
             distance_fn=edit_dist,
-            ranking_scores=torch.tensor(candidate_scores, dtype=torch.float32),
-            n=min(self.cfg.num_samples, len(candidate_points)),
+            ranking_scores=torch.tensor(candidate_scores.flatten()),
+            n=self.cfg.num_samples,
             descending=True,
         )
-
         print("Initial scores of candidates to mutate:")
         print(candidate_scores[indices])
         return candidate_points[indices]
