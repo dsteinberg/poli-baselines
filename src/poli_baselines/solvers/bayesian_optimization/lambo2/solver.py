@@ -398,7 +398,9 @@ class LaMBO2(AbstractSolver):
         if len(ranking_scores.shape) == 2:
             # convert from multi-objective scores to Pareto ranks
             nds = NonDominatedSorting()
-            _, rank = nds.do(ranking_scores, return_rank=True)
+            _, rank = nds.do(
+                -ranking_scores, return_rank=True
+            )  # pymoo assumes minimisation
         else:
             rank = ranking_scores
 
@@ -440,7 +442,7 @@ class LaMBO2(AbstractSolver):
             distance_fn=edit_dist,
             ranking_scores=torch.tensor(y),
             n=min(self.cfg.num_samples, len(x)),
-            descending=True,
+            descending=False,
         )
         print("Initial scores of candidates to mutate:")
         print(y[indices])
