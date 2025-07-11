@@ -442,6 +442,7 @@ class LaMBO2(AbstractSolver):
             n=min(self.cfg.num_samples, len(x)),
             descending=True,
         )
+        print("Initial scores of candidates to mutate:")
         print(y[indices])
         return x[indices]
 
