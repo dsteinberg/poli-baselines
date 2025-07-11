@@ -427,25 +427,25 @@ class LaMBO2(AbstractSolver):
 
         return selected
 
-    # def get_candidate_points_from_history(self) -> np.ndarray:
-    #     y = np.concatenate(self.history_for_training["y"], axis=0)
-    #     if y.ndim < 2:
-    #         return self.get_candidate_points_from_history_old()
-    #     if y.shape[1] == 1:
-    #         return self.get_candidate_points_from_history_old()
-    #     x = np.concatenate(self.history_for_training["x"], axis=0)
-
-    #     indices = self.farthest_first_traversal_moo(
-    #         library=x,
-    #         distance_fn=edit_dist,
-    #         ranking_scores=torch.tensor(y),
-    #         n=min(self.cfg.num_samples, len(x)),
-    #         descending=True,
-    #     )
-    #     print(y[indices])
-    #     return x[indices]
-
     def get_candidate_points_from_history(self) -> np.ndarray:
+        y = np.concatenate(self.history_for_training["y"], axis=0)
+        if y.ndim < 2:
+            return self.get_candidate_points_from_history_old()
+        if y.shape[1] == 1:
+            return self.get_candidate_points_from_history_old()
+        x = np.concatenate(self.history_for_training["x"], axis=0)
+
+        indices = self.farthest_first_traversal_moo(
+            library=x,
+            distance_fn=edit_dist,
+            ranking_scores=torch.tensor(y),
+            n=min(self.cfg.num_samples, len(x)),
+            descending=True,
+        )
+        print(y[indices])
+        return x[indices]
+
+    def get_candidate_points_from_history_old(self) -> np.ndarray:
         """
         Returns the current best population (whose size is specified in the
         configuration file as cfg.num_samples) from the history of the black
