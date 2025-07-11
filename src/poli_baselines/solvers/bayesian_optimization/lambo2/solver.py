@@ -189,10 +189,7 @@ class LaMBO2(AbstractSolver):
         else:
             print(OmegaConf.to_yaml(self.cfg))
             raise ValueError("Expected `generic_task` in cfg but not found.")
-        mn = y0.min(axis=0)
-        mx = y0.max(axis=0)
-        self.shift = mn
-        self.scale = mx - mn
+        # self.cfg.guidance_objective.static_kwargs.objectives = self.outcome_cols
         print(OmegaConf.to_yaml(cfg))
 
         self.history_for_training = {
@@ -286,7 +283,7 @@ class LaMBO2(AbstractSolver):
         print(f"Non-dominated Objective Values: \n{top_y}")
 
         obj_cols = {
-            oc: (feasible_y[:, i] - self.shift[i]) / self.scale[i]
+            oc: feasible_y[:, i]
             for oc, i in zip(self.outcome_cols, range(feasible_y.shape[1]))
         }
         task_setup_kwargs = {
